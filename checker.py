@@ -90,48 +90,50 @@ def fetch_category_files(category: str, depth: int = 4) -> set[str]:
     categories_to_visit = {category}
     visited_cats: set[str] = set()
 
-    print(f"Hämtar filindex för kategorin '{category}' (djup {depth})...")
-
-    for _ in range(depth + 1):
-        if not categories_to_visit:
-            break
-        next_level: set[str] = set()
-        for cat in categories_to_visit:
-            if cat in visited_cats:
-                continue
-            visited_cats.add(cat)
-            cmcontinue = None
-            while True:
-                params: dict = {
-                    "action": "query",
-                    "list": "categorymembers",
-                    "cmtitle": f"Category:{cat}",
-                    "cmlimit": 500,
-                    "cmtype": "file|subcat",
-                    "format": "json",
-                }
-                if cmcontinue:
-                    params["cmcontinue"] = cmcontinue
-                time.sleep(1)
-                try:
-                    r = requests.get(COMMONS_API, params=params, timeout=15,
-                                     headers={"User-Agent": "CommonsUploadChecker/0.1 (salgo60@msn.com)"})
-                    r.raise_for_status()
-                    data = r.json()
-                except Exception as e:
-                    print(f"  [fel vid kategori '{cat}'] {e}", file=sys.stderr)
-                    break
-                for m in data.get("query", {}).get("categorymembers", []):
-                    if m["ns"] == 6:       # File
-                        titles.add(m["title"])
-                    elif m["ns"] == 14:    # Category
-                        subcat = m["title"].removeprefix("Category:")
-                        next_level.add(subcat)
-                if "continue" in data:
-                    cmcontinue = data["continue"].get("cmcontinue")
-                else:
-                    break
-        categories_to_visit = next_level - visited_cats
+    with tqdm(desc="Hämtar kategori-index", unit=" API-anrop",
+              bar_format="{l_bar}{bar}| {n} anrop [{elapsed}] filer:{postfix}") as bar:
+        for _ in range(depth + 1):
+            if not categories_to_visit:
+                break
+            next_level: set[str] = set()
+            for cat in categories_to_visit:
+                if cat in visited_cats:
+                    continue
+                visited_cats.add(cat)
+                cmcontinue = None
+                while True:
+                    params: dict = {
+                        "action": "query",
+                        "list": "categorymembers",
+                        "cmtitle": f"Category:{cat}",
+                        "cmlimit": 500,
+                        "cmtype": "file|subcat",
+                        "format": "json",
+                    }
+                    if cmcontinue:
+                        params["cmcontinue"] = cmcontinue
+                    time.sleep(1)
+                    try:
+                        r = requests.get(COMMONS_API, params=params, timeout=15,
+                                         headers={"User-Agent": "CommonsUploadChecker/0.1 (salgo60@msn.com)"})
+                        r.raise_for_status()
+                        data = r.json()
+                    except Exception as e:
+                        tqdm.write(f"  [fel vid kategori '{cat}'] {e}", file=sys.stderr)
+                        break
+                    for m in data.get("query", {}).get("categorymembers", []):
+                        if m["ns"] == 6:       # File
+                            titles.add(m["title"])
+                        elif m["ns"] == 14:    # Category
+                            subcat = m["title"].removeprefix("Category:")
+                            next_level.add(subcat)
+                    bar.update(1)
+                    bar.set_postfix_str(f"{len(titles)} filer, {len(next_level | categories_to_visit)} subkategorier")
+                    if "continue" in data:
+                        cmcontinue = data["continue"].get("cmcontinue")
+                    else:
+                        break
+            categories_to_visit = next_level - visited_cats
 
     print(f"  → {len(titles)} filer i kategorin.\n")
     return titles
