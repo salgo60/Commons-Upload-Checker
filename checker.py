@@ -202,7 +202,13 @@ def main():
 
     images = [p for p in folder.iterdir() if p.suffix.lower() in IMAGE_EXTENSIONS]
     if not images:
-        print("Inga bilder hittades i mappen.")
+        all_files = list(folder.iterdir())
+        if all_files:
+            exts = sorted({p.suffix for p in all_files})
+            print(f"Inga bilder hittades. Filer i mappen har ändelserna: {exts}")
+            print(f"Stödda format: {sorted(IMAGE_EXTENSIONS)}")
+        else:
+            print("Inga filer hittades i mappen.")
         sys.exit(0)
 
     if not _HEIF_SUPPORT and any(p.suffix.lower() in {".heic", ".heif"} for p in images):
