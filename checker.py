@@ -13,19 +13,29 @@ from pathlib import Path
 import requests
 from PIL import Image
 from PIL.ExifTags import TAGS, GPSTAGS
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+    _HEIF_SUPPORT = True
+except ImportError:
+    _HEIF_SUPPORT = False
 
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 RADIUS_M = 100        # geosearch-radie i meter
 DATE_TOLERANCE = 1    # dagars tolerans vid datumsökning
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".tif", ".tiff", ".png"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".tif", ".tiff", ".png", ".heic", ".heif"}
 
 
 def get_exif(path: Path) -> dict:
-    """Returnerar råa EXIF-taggar från en bildfil."""
+    """Returnerar råa EXIF-taggar från en bildfil (inkl. HEIC)."""
     try:
         with Image.open(path) as img:
-            exif_raw = img._getexif()
+            exif_raw = img._getexif() if hasattr(img, "_getexif") else None
+            if exif_raw is None:
+                # HEIC via pillow-heif
+                info = img.getexif()
+                exif_raw = dict(info) if info else {}
             if not exif_raw:
                 return {}
             return {TAGS.get(k, k): v for k, v in exif_raw.items()}
@@ -194,6 +204,9 @@ def main():
     if not images:
         print("Inga bilder hittades i mappen.")
         sys.exit(0)
+
+    if not _HEIF_SUPPORT and any(p.suffix.lower() in {".heic", ".heif"} for p in images):
+        print("OBS: pillow-heif saknas – HEIC-filer hoppas över. Installera: pip install pillow-heif", file=sys.stderr)
 
     print(f"Kontrollerar {len(images)} bild(er) mot Wikimedia Commons...\n")
 
