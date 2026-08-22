@@ -269,6 +269,111 @@ def check_file(path: Path, category_titles: set[str] | None = None) -> dict:
     return result
 
 
+def write_html_report(path: Path, results: list[dict], category: str | None) -> None:
+    """Genererar en HTML-rapport med klickbara koordinater och upload-länkar."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    cat_url = (f"https://commons.wikimedia.org/wiki/Category:{category.replace(' ', '_')}"
+               if category else "")
+
+    def wikimap_url(lat: str, lon: str) -> str:
+        return f"https://wikimap.toolforge.org/?wp=false&basemap=2&cluster=false&zoom=18&lat={lat}&lon={lon}"
+
+    def commons_nearby_url(lat: str, lon: str) -> str:
+        return (f"https://commons.wikimedia.org/w/index.php?title=Special:Search"
+                f"&ns6=1&search=nearcoord:{RADIUS_M},{lat},{lon}")
+
+    def upload_url() -> str:
+        return "https://commons.wikimedia.org/wiki/Special:UploadWizard"
+
+    def row_class(status: str) -> str:
+        if status == "MATCH":
+            return "match"
+        if "möjlig" in status:
+            return "possible"
+        return "nomatch"
+
+    rows_html = ""
+    for r in results:
+        lat, lon = r.get("lat", ""), r.get("lon", "")
+        cls = row_class(r["status"])
+
+        coord_cell = "–"
+        if lat and lon:
+            coord_cell = (
+                f'<a href="{wikimap_url(lat, lon)}" target="_blank" title="Visa på WikiMap">'
+                f'📍 {float(lat):.4f}, {float(lon):.4f}</a>'
+                f' <a href="{commons_nearby_url(lat, lon)}" target="_blank" title="Sök nearby på Commons">🔍</a>'
+            )
+
+        match_cell = "–"
+        if r.get("commons_url"):
+            match_cell = f'<a href="{r["commons_url"]}" target="_blank">🖼 {r["commons_match"]}</a>'
+        elif cls == "nomatch" and lat and lon:
+            match_cell = f'<a href="{upload_url()}" target="_blank">⬆️ Ladda upp</a>'
+
+        rows_html += f"""
+        <tr class="{cls}">
+          <td>{r["file"]}</td>
+          <td>{r.get("local_date", "–")}</td>
+          <td>{coord_cell}</td>
+          <td>{r["status"]}</td>
+          <td>{match_cell}</td>
+        </tr>"""
+
+    counts = {}
+    for r in results:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    summary_html = " &nbsp;|&nbsp; ".join(
+        f"<b>{v}</b> {k}" for k, v in sorted(counts.items(), key=lambda x: -x[1])
+    )
+
+    html = f"""<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="UTF-8">
+<title>Commons Upload Checker – rapport {now}</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; padding: 1rem 2rem; }}
+  h1 {{ color: #3366cc; }}
+  .summary {{ background: #f0f4ff; padding: .7rem 1rem; border-radius: 6px; margin-bottom: 1rem; }}
+  table {{ border-collapse: collapse; width: 100%; font-size: .9rem; }}
+  th {{ background: #3366cc; color: #fff; padding: .5rem .8rem; text-align: left; position: sticky; top: 0; }}
+  td {{ padding: .4rem .8rem; border-bottom: 1px solid #ddd; vertical-align: top; }}
+  tr.match td:first-child {{ border-left: 4px solid #2da44e; }}
+  tr.possible td:first-child {{ border-left: 4px solid #f0a500; }}
+  tr.nomatch td:first-child {{ border-left: 4px solid #cf222e; }}
+  tr:hover {{ background: #f6f8fa; }}
+  a {{ color: #3366cc; text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+</style>
+</head>
+<body>
+<h1>Commons Upload Checker</h1>
+<p class="summary">
+  Kördes: {now} &nbsp;|&nbsp; {len(results)} bilder kontrollerade
+  {f'&nbsp;|&nbsp; Kategori: <a href="{cat_url}" target="_blank">{category}</a>' if category else ""}
+  <br>{summary_html}
+</p>
+<table>
+  <thead>
+    <tr>
+      <th>Fil</th>
+      <th>Datum (EXIF)</th>
+      <th>Koordinater</th>
+      <th>Status</th>
+      <th>Commons / Åtgärd</th>
+    </tr>
+  </thead>
+  <tbody>
+    {rows_html}
+  </tbody>
+</table>
+</body>
+</html>"""
+
+    path.write_text(html, encoding="utf-8")
+
+
 def main():
     global API_DELAY
     parser = argparse.ArgumentParser(
@@ -286,6 +391,8 @@ def main():
                         help="Sök i hela Commons (ignorera kategori-filter)")
     parser.add_argument("--refresh-cache", action="store_true",
                         help="Uppdatera lokal kategori-cache från Commons")
+    parser.add_argument("--html", metavar="FILE",
+                        help="Spara HTML-rapport till angiven fil")
     args = parser.parse_args()
 
     folder = Path(args.folder)
@@ -344,6 +451,12 @@ def main():
             writer.writeheader()
             writer.writerows(results)
         print(f"\nResultat sparat i {out}")
+
+    # HTML-rapport
+    if args.html:
+        html_path = Path(args.html)
+        write_html_report(html_path, results, args.category if not args.no_category else None)
+        print(f"HTML-rapport sparad i {html_path}")
 
 
 if __name__ == "__main__":
