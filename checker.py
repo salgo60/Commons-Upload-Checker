@@ -6,13 +6,16 @@ Jämför lokala bilder med Wikimedia Commons via EXIF-data (GPS-koordinater + da
 
 import argparse
 import csv
+import json
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
 from PIL import Image
 from PIL.ExifTags import TAGS, GPSTAGS
+from tqdm import tqdm
 try:
     from pillow_heif import register_heif_opener
     register_heif_opener()
@@ -24,6 +27,7 @@ except ImportError:
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 RADIUS_M = 100        # geosearch-radie i meter
 DATE_TOLERANCE = 1    # dagars tolerans vid datumsökning
+API_DELAY = 10.0      # sekunder mellan API-anrop (snäll mot Wikimedia)
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".tif", ".tiff", ".png", ".heic", ".heif"}
 
 
@@ -31,14 +35,15 @@ def get_exif(path: Path) -> dict:
     """Returnerar råa EXIF-taggar från en bildfil (inkl. HEIC)."""
     try:
         with Image.open(path) as img:
-            exif_raw = img._getexif() if hasattr(img, "_getexif") else None
-            if exif_raw is None:
-                # HEIC via pillow-heif
-                info = img.getexif()
-                exif_raw = dict(info) if info else {}
-            if not exif_raw:
+            exif_obj = img.getexif()
+            if not exif_obj:
                 return {}
-            return {TAGS.get(k, k): v for k, v in exif_raw.items()}
+            result = {TAGS.get(k, k): v for k, v in exif_obj.items()}
+            # Hämta GPS IFD korrekt (fungerar för både JPEG och HEIC)
+            gps_ifd = exif_obj.get_ifd(0x8825)
+            if gps_ifd:
+                result["GPSInfo"] = gps_ifd
+            return result
     except Exception:
         return {}
 
@@ -46,7 +51,7 @@ def get_exif(path: Path) -> dict:
 def parse_gps(exif: dict) -> tuple[float, float] | None:
     """Returnerar (lat, lon) eller None om GPS saknas."""
     gps_info = exif.get("GPSInfo")
-    if not gps_info:
+    if not gps_info or not hasattr(gps_info, "items"):
         return None
     gps = {GPSTAGS.get(k, k): v for k, v in gps_info.items()}
 
@@ -76,6 +81,79 @@ def parse_date(exif: dict) -> datetime | None:
         return None
 
 
+def fetch_category_files(category: str, depth: int = 4) -> set[str]:
+    """
+    Hämtar alla filnamn (File:...) från en Commons-kategori rekursivt.
+    Returnerar en set med titlar, t.ex. {'File:Foo.jpg', ...}.
+    """
+    titles: set[str] = set()
+    categories_to_visit = {category}
+    visited_cats: set[str] = set()
+
+    print(f"Hämtar filindex för kategorin '{category}' (djup {depth})...")
+
+    for _ in range(depth + 1):
+        if not categories_to_visit:
+            break
+        next_level: set[str] = set()
+        for cat in categories_to_visit:
+            if cat in visited_cats:
+                continue
+            visited_cats.add(cat)
+            cmcontinue = None
+            while True:
+                params: dict = {
+                    "action": "query",
+                    "list": "categorymembers",
+                    "cmtitle": f"Category:{cat}",
+                    "cmlimit": 500,
+                    "cmtype": "file|subcat",
+                    "format": "json",
+                }
+                if cmcontinue:
+                    params["cmcontinue"] = cmcontinue
+                time.sleep(1)
+                try:
+                    r = requests.get(COMMONS_API, params=params, timeout=15,
+                                     headers={"User-Agent": "CommonsUploadChecker/0.1 (salgo60@msn.com)"})
+                    r.raise_for_status()
+                    data = r.json()
+                except Exception as e:
+                    print(f"  [fel vid kategori '{cat}'] {e}", file=sys.stderr)
+                    break
+                for m in data.get("query", {}).get("categorymembers", []):
+                    if m["ns"] == 6:       # File
+                        titles.add(m["title"])
+                    elif m["ns"] == 14:    # Category
+                        subcat = m["title"].removeprefix("Category:")
+                        next_level.add(subcat)
+                if "continue" in data:
+                    cmcontinue = data["continue"].get("cmcontinue")
+                else:
+                    break
+        categories_to_visit = next_level - visited_cats
+
+    print(f"  → {len(titles)} filer i kategorin.\n")
+    return titles
+
+
+def load_or_build_cache(category: str, cache_path: Path, refresh: bool = False) -> set[str]:
+    """Läser cache från disk, eller bygger den om den saknas/refresh=True."""
+    if not refresh and cache_path.exists():
+        print(f"Laddar kategori-cache från {cache_path} ...")
+        with cache_path.open(encoding="utf-8") as f:
+            data = json.load(f)
+        titles = set(data["titles"])
+        print(f"  → {len(titles)} filer (cachad {data['created_at']}).\n")
+        return titles
+    titles = fetch_category_files(category)
+    with cache_path.open("w", encoding="utf-8") as f:
+        json.dump({"category": category, "created_at": datetime.now().isoformat(),
+                   "titles": sorted(titles)}, f, ensure_ascii=False, indent=2)
+    print(f"Cache sparad i {cache_path}\n")
+    return titles
+
+
 def geosearch_commons(lat: float, lon: float, radius: int = RADIUS_M) -> list[dict]:
     """Söker Commons-filer nära en koordinat."""
     params = {
@@ -88,8 +166,9 @@ def geosearch_commons(lat: float, lon: float, radius: int = RADIUS_M) -> list[di
         "format": "json",
     }
     try:
+        time.sleep(API_DELAY)
         r = requests.get(COMMONS_API, params=params, timeout=10,
-                         headers={"User-Agent": "CommonsUploadChecker/0.1"})
+                         headers={"User-Agent": "CommonsUploadChecker/0.1 (salgo60@msn.com)"})
         r.raise_for_status()
         return r.json().get("query", {}).get("geosearch", [])
     except Exception as e:
@@ -108,7 +187,7 @@ def get_file_date(title: str) -> datetime | None:
     }
     try:
         r = requests.get(COMMONS_API, params=params, timeout=10,
-                         headers={"User-Agent": "CommonsUploadChecker/0.1"})
+                         headers={"User-Agent": "CommonsUploadChecker/0.1 (salgo60@msn.com)"})
         r.raise_for_status()
         pages = r.json().get("query", {}).get("pages", {})
         for page in pages.values():
@@ -124,7 +203,7 @@ def get_file_date(title: str) -> datetime | None:
     return None
 
 
-def check_file(path: Path) -> dict:
+def check_file(path: Path, category_titles: set[str] | None = None) -> dict:
     """Kör en komplett kontroll för en lokal fil."""
     result = {
         "file": path.name,
@@ -154,6 +233,9 @@ def check_file(path: Path) -> dict:
         return result
 
     candidates = geosearch_commons(coords[0], coords[1])
+    # Filtrera kandidater mot kategori-cache om den finns
+    if category_titles is not None:
+        candidates = [c for c in candidates if c["title"] in category_titles]
     if not candidates:
         result["status"] = "ej funnen"
         return result
@@ -193,6 +275,14 @@ def main():
     parser.add_argument("-o", "--output", help="Spara resultat till CSV-fil")
     parser.add_argument("-r", "--radius", type=int, default=RADIUS_M,
                         help=f"Geosearch-radie i meter (standard: {RADIUS_M})")
+    parser.add_argument("-d", "--delay", type=float, default=API_DELAY,
+                        help=f"Sekunder mellan API-anrop (standard: {API_DELAY})")
+    parser.add_argument("-c", "--category", default="Stockholm_Archipelago_Trail",
+                        help="Commons-kategori att begränsa sökningen till")
+    parser.add_argument("--no-category", action="store_true",
+                        help="Sök i hela Commons (ignorera kategori-filter)")
+    parser.add_argument("--refresh-cache", action="store_true",
+                        help="Uppdatera lokal kategori-cache från Commons")
     args = parser.parse_args()
 
     folder = Path(args.folder)
@@ -214,14 +304,27 @@ def main():
     if not _HEIF_SUPPORT and any(p.suffix.lower() in {".heic", ".heif"} for p in images):
         print("OBS: pillow-heif saknas – HEIC-filer hoppas över. Installera: pip install pillow-heif", file=sys.stderr)
 
-    print(f"Kontrollerar {len(images)} bild(er) mot Wikimedia Commons...\n")
+    eta_min = len(images) * args.delay / 60
+    global API_DELAY
+    API_DELAY = args.delay
+
+    # Ladda eller bygg kategori-cache
+    category_titles: set[str] | None = None
+    if not args.no_category:
+        cache_file = Path(f"cache_{args.category}.json")
+        category_titles = load_or_build_cache(args.category, cache_file, args.refresh_cache)
+        print(f"Filtrerar mot {len(category_titles)} filer i '{args.category}'")
+
+    print(f"Kontrollerar {len(images)} bild(er) mot Wikimedia Commons...")
+    print(f"Delay: {args.delay}s per bild – beräknad tid: ~{eta_min:.0f} minuter\n")
 
     results = []
-    for img in sorted(images):
-        print(f"  {img.name} ... ", end="", flush=True)
-        row = check_file(img)
-        results.append(row)
-        print(row["status"])
+    with tqdm(sorted(images), unit="bild", dynamic_ncols=True) as bar:
+        for img in bar:
+            bar.set_description(img.name[:30])
+            row = check_file(img, category_titles)
+            results.append(row)
+            bar.set_postfix(status=row["status"])
 
     # Sammanfattning
     print("\n--- Sammanfattning ---")
