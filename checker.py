@@ -183,8 +183,56 @@ def geosearch_commons(lat: float, lon: float, radius: int = RADIUS_M) -> list[di
         return []
 
 
+def get_sdc_data(pageid: int) -> tuple[datetime | None, tuple[float, float] | None]:
+    """
+    Hämtar P571 (datum) och P1259 (koordinater från fotografens position)
+    från Wikimedia Commons Structured Data (SDC).
+    Returnerar (datum, (lat, lon)) – None om ej tillgängligt.
+    """
+    url = f"https://commons.wikimedia.org/entity/M{pageid}.json"
+    try:
+        r = requests.get(url, timeout=10,
+                         headers={"User-Agent": "CommonsUploadChecker/0.1 (salgo60@msn.com)"})
+        r.raise_for_status()
+        statements = r.json().get("statements", {})
+
+        # P571 – datum
+        date = None
+        for s in statements.get("P571", []):
+            try:
+                raw = s["mainsnak"]["datavalue"]["value"]["time"]
+                date = datetime.strptime(raw[:11].lstrip("+"), "%Y-%m-%d")
+                break
+            except (KeyError, ValueError):
+                pass
+
+        # P1259 – point of view (fotografens position)
+        coords = None
+        for s in statements.get("P1259", []):
+            try:
+                val = s["mainsnak"]["datavalue"]["value"]
+                coords = (float(val["latitude"]), float(val["longitude"]))
+                break
+            except (KeyError, TypeError):
+                pass
+
+        # Fallback P625 – koordinat för objektet
+        if coords is None:
+            for s in statements.get("P625", []):
+                try:
+                    val = s["mainsnak"]["datavalue"]["value"]
+                    coords = (float(val["latitude"]), float(val["longitude"]))
+                    break
+                except (KeyError, TypeError):
+                    pass
+
+        return date, coords
+    except Exception:
+        return None, None
+
+
 def get_file_date(title: str) -> datetime | None:
-    """Hämtar DateTimeOriginal från EXIF för en Commons-fil."""
+    """Hämtar DateTimeOriginal från EXIF för en Commons-fil (fallback om SDC saknas)."""
     params = {
         "action": "query",
         "titles": title,
@@ -256,11 +304,18 @@ def check_file(path: Path, category_files: dict[str, int] | None = None) -> dict
         result["commons_url"] = "https://commons.wikimedia.org/wiki/" + title.replace(" ", "_")
         return result
 
-    # Jämför datum om vi har det
+    # Jämför datum och koordinater via SDC (P571+P1259), fallback till EXIF-metadata
     for c in candidates:
         title = c["title"]
+        pageid = (category_files or {}).get(title, 0)
+
         if local_date:
-            commons_date = get_file_date(title)
+            commons_date = None
+            if pageid:
+                sdc_date, _ = get_sdc_data(pageid)
+                commons_date = sdc_date
+            if commons_date is None:
+                commons_date = get_file_date(title)
             if commons_date:
                 diff = abs((commons_date - local_date).days)
                 if diff <= DATE_TOLERANCE:
