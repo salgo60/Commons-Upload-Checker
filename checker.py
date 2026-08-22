@@ -81,12 +81,12 @@ def parse_date(exif: dict) -> datetime | None:
         return None
 
 
-def fetch_category_files(category: str, depth: int = 4) -> set[str]:
+def fetch_category_files(category: str, depth: int = 4) -> dict[str, int]:
     """
-    Hämtar alla filnamn (File:...) från en Commons-kategori rekursivt.
-    Returnerar en set med titlar, t.ex. {'File:Foo.jpg', ...}.
+    Hämtar alla filer från en Commons-kategori rekursivt.
+    Returnerar dict {title: pageid}, t.ex. {'File:Foo.jpg': 178228206, ...}.
     """
-    titles: set[str] = set()
+    files: dict[str, int] = {}
     categories_to_visit = {category}
     visited_cats: set[str] = set()
 
@@ -123,37 +123,42 @@ def fetch_category_files(category: str, depth: int = 4) -> set[str]:
                         break
                     for m in data.get("query", {}).get("categorymembers", []):
                         if m["ns"] == 6:       # File
-                            titles.add(m["title"])
+                            files[m["title"]] = m["pageid"]
                         elif m["ns"] == 14:    # Category
                             subcat = m["title"].removeprefix("Category:")
                             next_level.add(subcat)
                     bar.update(1)
-                    bar.set_postfix_str(f"{len(titles)} filer, {len(next_level | categories_to_visit)} subkategorier")
+                    bar.set_postfix_str(f"{len(files)} filer, {len(next_level | categories_to_visit)} subkategorier")
                     if "continue" in data:
                         cmcontinue = data["continue"].get("cmcontinue")
                     else:
                         break
             categories_to_visit = next_level - visited_cats
 
-    print(f"  → {len(titles)} filer i kategorin.\n")
-    return titles
+    print(f"  → {len(files)} filer i kategorin.\n")
+    return files
 
 
-def load_or_build_cache(category: str, cache_path: Path, refresh: bool = False) -> set[str]:
-    """Läser cache från disk, eller bygger den om den saknas/refresh=True."""
+def load_or_build_cache(category: str, cache_path: Path, refresh: bool = False) -> dict[str, int]:
+    """Läser cache från disk (title→pageid), eller bygger den om den saknas/refresh=True."""
     if not refresh and cache_path.exists():
         print(f"Laddar kategori-cache från {cache_path} ...")
         with cache_path.open(encoding="utf-8") as f:
             data = json.load(f)
-        titles = set(data["titles"])
-        print(f"  → {len(titles)} filer (cachad {data['created_at']}).\n")
-        return titles
-    titles = fetch_category_files(category)
+        # Bakåtkompatibilitet: gammalt format hade bara "titles"-lista
+        if "files" in data:
+            files = data["files"]
+        else:
+            files = {t: 0 for t in data["titles"]}
+        print(f"  → {len(files)} filer (cachad {data['created_at']}).\n")
+        return files
+    files = fetch_category_files(category)
     with cache_path.open("w", encoding="utf-8") as f:
         json.dump({"category": category, "created_at": datetime.now().isoformat(),
-                   "titles": sorted(titles)}, f, ensure_ascii=False, indent=2)
+                   "files": {t: p for t, p in sorted(files.items())}},
+                  f, ensure_ascii=False, indent=2)
     print(f"Cache sparad i {cache_path}\n")
-    return titles
+    return files
 
 
 def geosearch_commons(lat: float, lon: float, radius: int = RADIUS_M) -> list[dict]:
@@ -205,7 +210,7 @@ def get_file_date(title: str) -> datetime | None:
     return None
 
 
-def check_file(path: Path, category_titles: set[str] | None = None) -> dict:
+def check_file(path: Path, category_files: dict[str, int] | None = None) -> dict:
     """Kör en komplett kontroll för en lokal fil."""
     result = {
         "file": path.name,
@@ -214,6 +219,7 @@ def check_file(path: Path, category_titles: set[str] | None = None) -> dict:
         "local_date": "",
         "status": "okänd",
         "commons_match": "",
+        "commons_mid": "",
         "commons_url": "",
     }
 
@@ -236,10 +242,18 @@ def check_file(path: Path, category_titles: set[str] | None = None) -> dict:
 
     candidates = geosearch_commons(coords[0], coords[1])
     # Filtrera kandidater mot kategori-cache om den finns
-    if category_titles is not None:
-        candidates = [c for c in candidates if c["title"] in category_titles]
+    if category_files is not None:
+        candidates = [c for c in candidates if c["title"] in category_files]
     if not candidates:
         result["status"] = "ej funnen"
+        return result
+
+    def set_match(title: str, status: str) -> dict:
+        pageid = (category_files or {}).get(title, 0)
+        result["status"] = status
+        result["commons_match"] = title
+        result["commons_mid"] = f"M{pageid}" if pageid else ""
+        result["commons_url"] = "https://commons.wikimedia.org/wiki/" + title.replace(" ", "_")
         return result
 
     # Jämför datum om vi har det
@@ -250,20 +264,9 @@ def check_file(path: Path, category_titles: set[str] | None = None) -> dict:
             if commons_date:
                 diff = abs((commons_date - local_date).days)
                 if diff <= DATE_TOLERANCE:
-                    result["status"] = "MATCH"
-                    result["commons_match"] = title
-                    result["commons_url"] = (
-                        "https://commons.wikimedia.org/wiki/" + title.replace(" ", "_")
-                    )
-                    return result
+                    return set_match(title, "MATCH")
         else:
-            # Utan datum – rapportera första träffen som möjlig match
-            result["status"] = "möjlig match (inget datum)"
-            result["commons_match"] = title
-            result["commons_url"] = (
-                "https://commons.wikimedia.org/wiki/" + title.replace(" ", "_")
-            )
-            return result
+            return set_match(title, "möjlig match (inget datum)")
 
     result["status"] = "ej funnen (datum skiljer)"
     return result
@@ -310,7 +313,11 @@ def write_html_report(path: Path, results: list[dict], category: str | None) -> 
 
         match_cell = "–"
         if r.get("commons_url"):
-            match_cell = f'<a href="{r["commons_url"]}" target="_blank">🖼 {r["commons_match"]}</a>'
+            mid = r.get("commons_mid", "")
+            mid_link = (f' <a href="https://commons.wikimedia.org/entity/{mid}" '
+                        f'target="_blank" title="Media ID">{mid}</a>' if mid else "")
+            match_cell = (f'<a href="{r["commons_url"]}" target="_blank">🖼 {r["commons_match"]}</a>'
+                          f'{mid_link}')
         elif cls == "nomatch" and lat and lon:
             match_cell = f'<a href="{upload_url()}" target="_blank">⬆️ Ladda upp</a>'
 
@@ -421,7 +428,7 @@ def main():
     API_DELAY = args.delay
 
     # Ladda eller bygg kategori-cache
-    category_titles: set[str] | None = None
+    category_titles: dict[str, int] | None = None
     if not args.no_category:
         cache_file = Path(f"cache_{args.category}.json")
         category_titles = load_or_build_cache(args.category, cache_file, args.refresh_cache)
