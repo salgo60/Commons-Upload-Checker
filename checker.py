@@ -275,6 +275,9 @@ def write_html_report(path: Path, results: list[dict], category: str | None) -> 
     cat_url = (f"https://commons.wikimedia.org/wiki/Category:{category.replace(' ', '_')}"
                if category else "")
 
+    def osm_url(lat: str, lon: str) -> str:
+        return f"https://www.openstreetmap.org/#map=19/{lat}/{lon}&layers=N"
+
     def wikimap_url(lat: str, lon: str) -> str:
         return f"https://wikimap.toolforge.org/?wp=false&basemap=2&cluster=false&zoom=18&lat={lat}&lon={lon}"
 
@@ -300,8 +303,8 @@ def write_html_report(path: Path, results: list[dict], category: str | None) -> 
         coord_cell = "–"
         if lat and lon:
             coord_cell = (
-                f'<a href="{wikimap_url(lat, lon)}" target="_blank" title="Visa på WikiMap">'
-                f'📍 {float(lat):.4f}, {float(lon):.4f}</a>'
+                f'<a href="{wikimap_url(lat, lon)}" target="_blank" title="WikiMap">📍 {float(lat):.4f}, {float(lon):.4f}</a>'
+                f' <a href="{osm_url(lat, lon)}" target="_blank" title="OpenStreetMap">🗺</a>'
                 f' <a href="{commons_nearby_url(lat, lon)}" target="_blank" title="Sök nearby på Commons">🔍</a>'
             )
 
