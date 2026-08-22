@@ -14,6 +14,7 @@ from pathlib import Path
 import requests
 from PIL import Image
 from PIL.ExifTags import TAGS, GPSTAGS
+from tqdm import tqdm
 try:
     from pillow_heif import register_heif_opener
     register_heif_opener()
@@ -25,7 +26,7 @@ except ImportError:
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 RADIUS_M = 100        # geosearch-radie i meter
 DATE_TOLERANCE = 1    # dagars tolerans vid datumsökning
-API_DELAY = 0.5       # sekunder mellan API-anrop (rate limiting)
+API_DELAY = 10.0      # sekunder mellan API-anrop (snäll mot Wikimedia)
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".tif", ".tiff", ".png", ".heic", ".heif"}
 
 
@@ -197,6 +198,8 @@ def main():
     parser.add_argument("-o", "--output", help="Spara resultat till CSV-fil")
     parser.add_argument("-r", "--radius", type=int, default=RADIUS_M,
                         help=f"Geosearch-radie i meter (standard: {RADIUS_M})")
+    parser.add_argument("-d", "--delay", type=float, default=API_DELAY,
+                        help=f"Sekunder mellan API-anrop (standard: {API_DELAY})")
     args = parser.parse_args()
 
     folder = Path(args.folder)
@@ -218,14 +221,19 @@ def main():
     if not _HEIF_SUPPORT and any(p.suffix.lower() in {".heic", ".heif"} for p in images):
         print("OBS: pillow-heif saknas – HEIC-filer hoppas över. Installera: pip install pillow-heif", file=sys.stderr)
 
-    print(f"Kontrollerar {len(images)} bild(er) mot Wikimedia Commons...\n")
+    eta_min = len(images) * args.delay / 60
+    global API_DELAY
+    API_DELAY = args.delay
+    print(f"Kontrollerar {len(images)} bild(er) mot Wikimedia Commons...")
+    print(f"Delay: {args.delay}s per bild – beräknad tid: ~{eta_min:.0f} minuter\n")
 
     results = []
-    for img in sorted(images):
-        print(f"  {img.name} ... ", end="", flush=True)
-        row = check_file(img)
-        results.append(row)
-        print(row["status"])
+    with tqdm(sorted(images), unit="bild", dynamic_ncols=True) as bar:
+        for img in bar:
+            bar.set_description(img.name[:30])
+            row = check_file(img)
+            results.append(row)
+            bar.set_postfix(status=row["status"])
 
     # Sammanfattning
     print("\n--- Sammanfattning ---")
