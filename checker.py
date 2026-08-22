@@ -268,6 +268,7 @@ def check_file(path: Path, category_titles: set[str] | None = None) -> dict:
 
 
 def main():
+    global API_DELAY
     parser = argparse.ArgumentParser(
         description="Kontrollera om lokala bilder finns uppladdade på Wikimedia Commons."
     )
@@ -305,7 +306,6 @@ def main():
         print("OBS: pillow-heif saknas – HEIC-filer hoppas över. Installera: pip install pillow-heif", file=sys.stderr)
 
     eta_min = len(images) * args.delay / 60
-    global API_DELAY
     API_DELAY = args.delay
 
     # Ladda eller bygg kategori-cache
