@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""
+Commons Upload Checker v0.1
+Jämför lokala bilder med Wikimedia Commons via EXIF-data (GPS-koordinater + datum).
+"""
+
+import argparse
+import csv
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import requests
+from PIL import Image
+from PIL.ExifTags import TAGS, GPSTAGS
+
+
+COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+RADIUS_M = 100        # geosearch-radie i meter
+DATE_TOLERANCE = 1    # dagars tolerans vid datumsökning
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".tif", ".tiff", ".png"}
+
+
+def get_exif(path: Path) -> dict:
+    """Returnerar råa EXIF-taggar från en bildfil."""
+    try:
+        with Image.open(path) as img:
+            exif_raw = img._getexif()
+            if not exif_raw:
+                return {}
+            return {TAGS.get(k, k): v for k, v in exif_raw.items()}
+    except Exception:
+        return {}
+
+
+def parse_gps(exif: dict) -> tuple[float, float] | None:
+    """Returnerar (lat, lon) eller None om GPS saknas."""
+    gps_info = exif.get("GPSInfo")
+    if not gps_info:
+        return None
+    gps = {GPSTAGS.get(k, k): v for k, v in gps_info.items()}
+
+    def to_decimal(vals, ref):
+        d, m, s = vals
+        dec = float(d) + float(m) / 60 + float(s) / 3600
+        if ref in ("S", "W"):
+            dec = -dec
+        return dec
+
+    try:
+        lat = to_decimal(gps["GPSLatitude"], gps.get("GPSLatitudeRef", "N"))
+        lon = to_decimal(gps["GPSLongitude"], gps.get("GPSLongitudeRef", "E"))
+        return lat, lon
+    except (KeyError, TypeError, ZeroDivisionError):
+        return None
+
+
+def parse_date(exif: dict) -> datetime | None:
+    """Returnerar datetime från DateTimeOriginal eller DateTime."""
+    raw = exif.get("DateTimeOriginal") or exif.get("DateTime")
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%Y:%m:%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def geosearch_commons(lat: float, lon: float, radius: int = RADIUS_M) -> list[dict]:
+    """Söker Commons-filer nära en koordinat."""
+    params = {
+        "action": "query",
+        "list": "geosearch",
+        "gscoord": f"{lat}|{lon}",
+        "gsradius": radius,
+        "gsnamespace": 6,  # File namespace
+        "gslimit": 50,
+        "format": "json",
+    }
+    try:
+        r = requests.get(COMMONS_API, params=params, timeout=10,
+                         headers={"User-Agent": "CommonsUploadChecker/0.1"})
+        r.raise_for_status()
+        return r.json().get("query", {}).get("geosearch", [])
+    except Exception as e:
+        print(f"  [API-fel] {e}", file=sys.stderr)
+        return []
+
+
+def get_file_date(title: str) -> datetime | None:
+    """Hämtar DateTimeOriginal från EXIF för en Commons-fil."""
+    params = {
+        "action": "query",
+        "titles": title,
+        "prop": "imageinfo",
+        "iiprop": "metadata",
+        "format": "json",
+    }
+    try:
+        r = requests.get(COMMONS_API, params=params, timeout=10,
+                         headers={"User-Agent": "CommonsUploadChecker/0.1"})
+        r.raise_for_status()
+        pages = r.json().get("query", {}).get("pages", {})
+        for page in pages.values():
+            metadata = (page.get("imageinfo") or [{}])[0].get("metadata") or []
+            for m in metadata:
+                if m.get("name") in ("DateTimeOriginal", "DateTime"):
+                    try:
+                        return datetime.strptime(m["value"], "%Y:%m:%d %H:%M:%S")
+                    except (ValueError, KeyError):
+                        pass
+    except Exception:
+        pass
+    return None
+
+
+def check_file(path: Path) -> dict:
+    """Kör en komplett kontroll för en lokal fil."""
+    result = {
+        "file": path.name,
+        "lat": "",
+        "lon": "",
+        "local_date": "",
+        "status": "okänd",
+        "commons_match": "",
+        "commons_url": "",
+    }
+
+    exif = get_exif(path)
+    if not exif:
+        result["status"] = "ingen EXIF"
+        return result
+
+    coords = parse_gps(exif)
+    local_date = parse_date(exif)
+
+    if local_date:
+        result["local_date"] = local_date.strftime("%Y-%m-%d %H:%M:%S")
+    if coords:
+        result["lat"], result["lon"] = f"{coords[0]:.6f}", f"{coords[1]:.6f}"
+
+    if not coords:
+        result["status"] = "saknar GPS"
+        return result
+
+    candidates = geosearch_commons(coords[0], coords[1])
+    if not candidates:
+        result["status"] = "ej funnen"
+        return result
+
+    # Jämför datum om vi har det
+    for c in candidates:
+        title = c["title"]
+        if local_date:
+            commons_date = get_file_date(title)
+            if commons_date:
+                diff = abs((commons_date - local_date).days)
+                if diff <= DATE_TOLERANCE:
+                    result["status"] = "MATCH"
+                    result["commons_match"] = title
+                    result["commons_url"] = (
+                        "https://commons.wikimedia.org/wiki/" + title.replace(" ", "_")
+                    )
+                    return result
+        else:
+            # Utan datum – rapportera första träffen som möjlig match
+            result["status"] = "möjlig match (inget datum)"
+            result["commons_match"] = title
+            result["commons_url"] = (
+                "https://commons.wikimedia.org/wiki/" + title.replace(" ", "_")
+            )
+            return result
+
+    result["status"] = "ej funnen (datum skiljer)"
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Kontrollera om lokala bilder finns uppladdade på Wikimedia Commons."
+    )
+    parser.add_argument("folder", help="Mapp med bilder att kontrollera")
+    parser.add_argument("-o", "--output", help="Spara resultat till CSV-fil")
+    parser.add_argument("-r", "--radius", type=int, default=RADIUS_M,
+                        help=f"Geosearch-radie i meter (standard: {RADIUS_M})")
+    args = parser.parse_args()
+
+    folder = Path(args.folder)
+    if not folder.is_dir():
+        print(f"Fel: '{folder}' är inte en giltig mapp.", file=sys.stderr)
+        sys.exit(1)
+
+    images = [p for p in folder.iterdir() if p.suffix.lower() in IMAGE_EXTENSIONS]
+    if not images:
+        print("Inga bilder hittades i mappen.")
+        sys.exit(0)
+
+    print(f"Kontrollerar {len(images)} bild(er) mot Wikimedia Commons...\n")
+
+    results = []
+    for img in sorted(images):
+        print(f"  {img.name} ... ", end="", flush=True)
+        row = check_file(img)
+        results.append(row)
+        print(row["status"])
+
+    # Sammanfattning
+    print("\n--- Sammanfattning ---")
+    counts = {}
+    for r in results:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    for status, count in sorted(counts.items()):
+        print(f"  {status}: {count}")
+
+    # CSV-export
+    if args.output:
+        out = Path(args.output)
+        with out.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=results[0].keys())
+            writer.writeheader()
+            writer.writerows(results)
+        print(f"\nResultat sparat i {out}")
+
+
+if __name__ == "__main__":
+    main()
