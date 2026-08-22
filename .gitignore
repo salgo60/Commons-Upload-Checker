@@ -1,4 +1,5 @@
 cache_*.json
 resultat*.csv
+rapport*.html
 __pycache__/
 *.pyc
