@@ -26,7 +26,7 @@ except ImportError:
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 RADIUS_M = 100        # geosearch-radie i meter
-DATE_TOLERANCE = 1    # dagars tolerans vid datumsökning
+DATE_TOLERANCE = 7    # dagars tolerans vid datumsökning
 API_DELAY = 10.0      # sekunder mellan API-anrop (snäll mot Wikimedia)
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".tif", ".tiff", ".png", ".heic", ".heif"}
 
@@ -231,34 +231,42 @@ def get_sdc_data(pageid: int) -> tuple[datetime | None, tuple[float, float] | No
         return None, None
 
 
-def get_file_date(title: str) -> datetime | None:
-    """Hämtar DateTimeOriginal från EXIF för en Commons-fil (fallback om SDC saknas)."""
+def get_file_info(title: str) -> dict:
+    """Hämtar uppladdare och datum för en Commons-fil i ett API-anrop."""
     params = {
         "action": "query",
         "titles": title,
         "prop": "imageinfo",
-        "iiprop": "metadata",
+        "iiprop": "user|metadata",
         "format": "json",
     }
+    result = {"user": None, "date": None}
     try:
         r = requests.get(COMMONS_API, params=params, timeout=10,
                          headers={"User-Agent": "CommonsUploadChecker/0.1 (salgo60@msn.com)"})
         r.raise_for_status()
         pages = r.json().get("query", {}).get("pages", {})
         for page in pages.values():
-            metadata = (page.get("imageinfo") or [{}])[0].get("metadata") or []
-            for m in metadata:
+            info = (page.get("imageinfo") or [{}])[0]
+            result["user"] = info.get("user")
+            for m in (info.get("metadata") or []):
                 if m.get("name") in ("DateTimeOriginal", "DateTime"):
                     try:
-                        return datetime.strptime(m["value"], "%Y:%m:%d %H:%M:%S")
+                        result["date"] = datetime.strptime(m["value"], "%Y:%m:%d %H:%M:%S")
                     except (ValueError, KeyError):
                         pass
+                    break
     except Exception:
         pass
-    return None
+    return result
 
 
-def check_file(path: Path, category_files: dict[str, int] | None = None) -> dict:
+def get_file_date(title: str) -> datetime | None:
+    """Hämtar DateTimeOriginal från EXIF för en Commons-fil (fallback om SDC saknas)."""
+    return get_file_info(title)["date"]
+
+def check_file(path: Path, category_files: dict[str, int] | None = None,
+               username: str | None = None) -> dict:
     """Kör en komplett kontroll för en lokal fil."""
     result = {
         "file": path.name,
@@ -269,6 +277,8 @@ def check_file(path: Path, category_files: dict[str, int] | None = None) -> dict
         "commons_match": "",
         "commons_mid": "",
         "commons_url": "",
+        "candidate_date": "",   # datum på närmaste Commons-träff (för felsökning)
+        "date_diff_days": "",   # dagars skillnad mot träffen
     }
 
     exif = get_exif(path)
@@ -305,9 +315,20 @@ def check_file(path: Path, category_files: dict[str, int] | None = None) -> dict
         return result
 
     # Jämför datum och koordinater via SDC (P571+P1259), fallback till EXIF-metadata
+    best_candidate_date: datetime | None = None
+    best_candidate_title: str = ""
+    best_diff: int | None = None
+
     for c in candidates:
         title = c["title"]
         pageid = (category_files or {}).get(title, 0)
+
+        # Om username är satt – kolla uppladdare direkt (snabbaste vägen)
+        if username:
+            info = get_file_info(title)
+            if info["user"] and info["user"].lower() == username.lower():
+                return set_match(title, "MATCH (din uppladdning)")
+            continue  # fel uppladdare, hoppa över
 
         if local_date:
             commons_date = None
@@ -315,13 +336,23 @@ def check_file(path: Path, category_files: dict[str, int] | None = None) -> dict
                 sdc_date, _ = get_sdc_data(pageid)
                 commons_date = sdc_date
             if commons_date is None:
-                commons_date = get_file_date(title)
+                commons_date = get_file_info(title)["date"]
             if commons_date:
                 diff = abs((commons_date - local_date).days)
+                if best_diff is None or diff < best_diff:
+                    best_diff = diff
+                    best_candidate_date = commons_date
+                    best_candidate_title = title
                 if diff <= DATE_TOLERANCE:
                     return set_match(title, "MATCH")
         else:
             return set_match(title, "möjlig match (inget datum)")
+
+    # Ingen exakt match – spara närmaste kandidat för felsökning
+    if best_candidate_date:
+        result["candidate_date"] = best_candidate_date.strftime("%Y-%m-%d")
+        result["date_diff_days"] = str(best_diff)
+        result["commons_match"] = best_candidate_title
 
     result["status"] = "ej funnen (datum skiljer)"
     return result
@@ -347,7 +378,7 @@ def write_html_report(path: Path, results: list[dict], category: str | None) -> 
         return "https://commons.wikimedia.org/wiki/Special:UploadWizard"
 
     def row_class(status: str) -> str:
-        if status == "MATCH":
+        if "MATCH" in status:
             return "match"
         if "möjlig" in status:
             return "possible"
@@ -383,6 +414,7 @@ def write_html_report(path: Path, results: list[dict], category: str | None) -> 
           <td>{coord_cell}</td>
           <td>{r["status"]}</td>
           <td>{match_cell}</td>
+          <td>{r.get("candidate_date") or "–"}{f' <small>({r["date_diff_days"]} dagar)</small>' if r.get("date_diff_days") else ""}</td>
         </tr>"""
 
     counts = {}
@@ -458,6 +490,8 @@ def main():
                         help="Uppdatera lokal kategori-cache från Commons")
     parser.add_argument("--html", metavar="FILE",
                         help="Spara HTML-rapport till angiven fil")
+    parser.add_argument("-u", "--username", default="salgo60",
+                        help="Commons-användarnamn att matcha mot (standard: salgo60)")
     args = parser.parse_args()
 
     folder = Path(args.folder)
@@ -496,7 +530,7 @@ def main():
     with tqdm(sorted(images), unit="bild", dynamic_ncols=True) as bar:
         for img in bar:
             bar.set_description(img.name[:30])
-            row = check_file(img, category_titles)
+            row = check_file(img, category_titles, username=args.username or None)
             results.append(row)
             bar.set_postfix(status=row["status"])
 
