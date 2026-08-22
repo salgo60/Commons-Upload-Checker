@@ -7,6 +7,7 @@ Jämför lokala bilder med Wikimedia Commons via EXIF-data (GPS-koordinater + da
 import argparse
 import csv
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -24,6 +25,7 @@ except ImportError:
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 RADIUS_M = 100        # geosearch-radie i meter
 DATE_TOLERANCE = 1    # dagars tolerans vid datumsökning
+API_DELAY = 0.5       # sekunder mellan API-anrop (rate limiting)
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".tif", ".tiff", ".png", ".heic", ".heif"}
 
 
@@ -31,14 +33,15 @@ def get_exif(path: Path) -> dict:
     """Returnerar råa EXIF-taggar från en bildfil (inkl. HEIC)."""
     try:
         with Image.open(path) as img:
-            exif_raw = img._getexif() if hasattr(img, "_getexif") else None
-            if exif_raw is None:
-                # HEIC via pillow-heif
-                info = img.getexif()
-                exif_raw = dict(info) if info else {}
-            if not exif_raw:
+            exif_obj = img.getexif()
+            if not exif_obj:
                 return {}
-            return {TAGS.get(k, k): v for k, v in exif_raw.items()}
+            result = {TAGS.get(k, k): v for k, v in exif_obj.items()}
+            # Hämta GPS IFD korrekt (fungerar för både JPEG och HEIC)
+            gps_ifd = exif_obj.get_ifd(0x8825)
+            if gps_ifd:
+                result["GPSInfo"] = gps_ifd
+            return result
     except Exception:
         return {}
 
@@ -46,7 +49,7 @@ def get_exif(path: Path) -> dict:
 def parse_gps(exif: dict) -> tuple[float, float] | None:
     """Returnerar (lat, lon) eller None om GPS saknas."""
     gps_info = exif.get("GPSInfo")
-    if not gps_info:
+    if not gps_info or not hasattr(gps_info, "items"):
         return None
     gps = {GPSTAGS.get(k, k): v for k, v in gps_info.items()}
 
@@ -88,8 +91,9 @@ def geosearch_commons(lat: float, lon: float, radius: int = RADIUS_M) -> list[di
         "format": "json",
     }
     try:
+        time.sleep(API_DELAY)
         r = requests.get(COMMONS_API, params=params, timeout=10,
-                         headers={"User-Agent": "CommonsUploadChecker/0.1"})
+                         headers={"User-Agent": "CommonsUploadChecker/0.1 (salgo60@msn.com)"})
         r.raise_for_status()
         return r.json().get("query", {}).get("geosearch", [])
     except Exception as e:
@@ -108,7 +112,7 @@ def get_file_date(title: str) -> datetime | None:
     }
     try:
         r = requests.get(COMMONS_API, params=params, timeout=10,
-                         headers={"User-Agent": "CommonsUploadChecker/0.1"})
+                         headers={"User-Agent": "CommonsUploadChecker/0.1 (salgo60@msn.com)"})
         r.raise_for_status()
         pages = r.json().get("query", {}).get("pages", {})
         for page in pages.values():
