@@ -1,5 +1,7 @@
 cache_*.json
 resultat*.csv
 rapport*.html
+photos_checker.db
+exports/
 __pycache__/
 *.pyc
