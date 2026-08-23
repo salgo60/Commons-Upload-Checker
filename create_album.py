@@ -40,17 +40,29 @@ def create_photos_album(album_name: str, uuids: list[str]) -> None:
 
     lib = photoscript.PhotosLibrary()
 
-    # Skapa eller hämta befintligt album
-    existing = lib.album(album_name)
-    if existing:
-        print(f"Album '{album_name}' finns redan ({len(existing.photos())} bilder). Lägger till ...")
-        album = existing
-    else:
-        album = lib.create_album(album_name)
-        print(f"Album '{album_name}' skapat.")
+    # Skapa eller hämta befintligt album (retry vid timeout)
+    album = None
+    for attempt in range(3):
+        try:
+            existing = lib.album(album_name)
+            if existing:
+                print(f"Album '{album_name}' finns redan. Lägger till ...")
+                album = existing
+            else:
+                album = lib.create_album(album_name)
+                print(f"Album '{album_name}' skapat.")
+            break
+        except Exception as e:
+            print(f"  Försök {attempt+1}/3 misslyckades: {e}")
+            import time; time.sleep(5)
 
+    if album is None:
+        print("Kunde inte skapa/hämta album. Försök igen när Photos är redo.", file=sys.stderr)
+        sys.exit(1)
+
+    import time
     print(f"Lägger till {len(uuids)} bilder i albumet ...")
-    batch_size = 50  # Photos hanterar stora batchar bättre i delar
+    batch_size = 25  # Liten batch för att undvika AppleEvent timeout
     added = 0
     errors = 0
     for i in range(0, len(uuids), batch_size):
@@ -62,9 +74,18 @@ def create_photos_album(album_name: str, uuids: list[str]) -> None:
             except Exception:
                 errors += 1
         if photos:
-            album.add(photos)
-            added += len(photos)
+            for attempt in range(3):
+                try:
+                    album.add(photos)
+                    added += len(photos)
+                    break
+                except Exception as e:
+                    if attempt < 2:
+                        time.sleep(3)
+                    else:
+                        errors += len(photos)
         print(f"  {added}/{len(uuids)} ...", end="\r", flush=True)
+        time.sleep(0.5)  # Andrum för Photos mellan batchar
 
     print(f"\nKlart! {added} bilder tillagda, {errors} misslyckades.")
     print(f"\nÖppna Photos → Album → '{album_name}'")
