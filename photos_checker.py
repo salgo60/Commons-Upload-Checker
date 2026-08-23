@@ -335,6 +335,7 @@ def write_report(db: sqlite3.Connection, path: Path, category: str) -> None:
 
 # ── main ──────────────────────────────────────────────────────────────────────
 def main() -> None:
+    global API_DELAY
     parser = argparse.ArgumentParser(
         description="Kontrollera Apple Photos mot Wikimedia Commons via osxphotos."
     )
@@ -361,7 +362,6 @@ def main() -> None:
                         help="Kör om Commons-kontroll för PENDING + AMBIGUOUS")
     args = parser.parse_args()
 
-    global API_DELAY
     API_DELAY = args.delay
 
     # Databas
