@@ -108,7 +108,11 @@ def main() -> None:
     year = args.from_date[:4]
     album_name = args.album or f"Commons-Kandidater {year}"
 
-    uuids = query_uuids(args.from_date, args.to_date)
+    # osxphotos --to-date är exklusivt ("before DATE"), lägg till 1 dag
+    from datetime import timedelta
+    to_date_inclusive = (datetime.strptime(args.to_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    uuids = query_uuids(args.from_date, to_date_inclusive)
     if not uuids:
         print("Inga bilder hittades.")
         sys.exit(0)

@@ -374,8 +374,11 @@ def main() -> None:
         print("Ingen kategori-cache – söker i hela Commons (långsammare).")
 
     # Hämta Photos-metadata
+    # osxphotos --to-date är exklusivt ("before DATE"), lägg till 1 dag
+    from datetime import timedelta
+    to_date_exclusive = (datetime.strptime(args.to_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
     print(f"\n1. Hämtar metadata från Apple Photos ({args.from_date} – {args.to_date})...")
-    assets_raw = query_photos(args.from_date, args.to_date, args.album)
+    assets_raw = query_photos(args.from_date, to_date_exclusive, args.album)
     print(f"   {len(assets_raw)} assets hittade i Photos.")
 
     new_count = 0
