@@ -333,7 +333,61 @@ def write_report(db: sqlite3.Connection, path: Path, category: str) -> None:
     print(f"HTML-rapport sparad i {path}")
 
 
-# ── main ──────────────────────────────────────────────────────────────────────
+# ── Ta bort FOUND-bilder från Photos-album ────────────────────────────────────
+def remove_found_from_album(db: sqlite3.Connection, album_name: str) -> None:
+    """Tar bort bilder med status FOUND från Photos-albumet via osascript."""
+    found = db.execute(
+        "SELECT uuid, filename FROM assets WHERE status = 'FOUND'"
+    ).fetchall()
+    if not found:
+        print("\n4. Inga FOUND-bilder att ta bort från albumet.")
+        return
+
+    print(f"\n4. Tar bort {len(found)} FOUND-bilder från albumet '{album_name}'...")
+    batch_size = 20
+    removed = 0
+    errors = 0
+    for i in range(0, len(found), batch_size):
+        batch = found[i : i + batch_size]
+        uuid_list = ", ".join(f'"{u}"' for u, _ in batch)
+        script = f'''
+tell application "Photos"
+    set theAlbum to album named "{album_name}"
+    set toRemove to {{}}
+    repeat with u in {{{uuid_list}}}
+        try
+            set end of toRemove to media item id u
+        end try
+    end repeat
+    remove toRemove from theAlbum
+    return count of toRemove
+end tell'''
+        for attempt in range(3):
+            try:
+                result = subprocess.run(
+                    ["osascript", "-e", script],
+                    capture_output=True, text=True, timeout=30
+                )
+                if result.returncode == 0:
+                    removed += len(batch)
+                    break
+                else:
+                    if attempt < 2:
+                        time.sleep(3)
+                    else:
+                        errors += len(batch)
+            except Exception:
+                if attempt < 2:
+                    time.sleep(3)
+                else:
+                    errors += len(batch)
+        print(f"  {removed}/{len(found)} borttagna ...", end="\r", flush=True)
+        time.sleep(0.3)
+
+    print(f"\n  Klart! {removed} borttagna från albumet, {errors} misslyckades.")
+
+
+
 def main() -> None:
     global API_DELAY
     parser = argparse.ArgumentParser(
@@ -352,12 +406,15 @@ def main() -> None:
                         help="SQLite-databas för resultat")
     parser.add_argument("--export-dir", type=Path, default=Path("exports"),
                         help="Mapp för exporterade NOT_FOUND-bilder")
-    parser.add_argument("--html",  type=Path, default=Path("rapport_photos.html"),
-                        help="HTML-rapport")
+    parser.add_argument("--html",  type=Path,
+                        default=Path(f"rapport_photos_{datetime.now().strftime('%Y%m%d')}.html"),
+                        help="HTML-rapport (standard: rapport_photos_YYYYMMDD.html)")
     parser.add_argument("--delay", type=float, default=API_DELAY,
                         help=f"Sekunder mellan API-anrop (standard: {API_DELAY})")
     parser.add_argument("--no-export", action="store_true",
                         help="Kontrollera men exportera inte NOT_FOUND-bilder")
+    parser.add_argument("--remove-found", action="store_true",
+                        help="Ta bort FOUND-bilder från Photos-albumet efter kontroll")
     parser.add_argument("--recheck", action="store_true",
                         help="Kör om Commons-kontroll för PENDING + AMBIGUOUS")
     args = parser.parse_args()
@@ -437,6 +494,13 @@ def main() -> None:
 
     # HTML-rapport
     write_report(db, args.html, args.category)
+
+    # Ta bort FOUND från album
+    if args.remove_found and args.album:
+        remove_found_from_album(db, args.album)
+    elif args.remove_found and not args.album:
+        print("\n4. --remove-found kräver --album, hoppas över.")
+
     db.close()
 
 
