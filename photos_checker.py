@@ -141,19 +141,22 @@ def extract_meta(asset: dict) -> dict | None:
 def export_asset(uuid: str, output_dir: Path) -> Path | None:
     """Exporterar ett enskilt asset med osxphotos (triggar iCloud-nedladdning)."""
     output_dir.mkdir(parents=True, exist_ok=True)
+    before = set(output_dir.iterdir())
     cmd = ["osxphotos", "export", str(output_dir),
            "--uuid", uuid, "--original", "--skip-edited",
            "--convert-to-jpeg", "--jpeg-quality", "0.9",
+           "--download-missing",  # triggar iCloud-nedladdning om nödvändigt
            "--no-progress"]
     print(f"  Exporterar {uuid} → {output_dir} ...", end=" ", flush=True)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        exported = [p for p in output_dir.iterdir() if uuid[:8] in p.name or True]
-        if exported:
-            newest = max(output_dir.iterdir(), key=lambda p: p.stat().st_mtime)
+        after = set(output_dir.iterdir())
+        new_files = after - before
+        if new_files:
+            newest = max(new_files, key=lambda p: p.stat().st_mtime)
             print(f"OK → {newest.name}")
             return newest
-        print("ingen fil exporterad")
+        print("ingen fil exporterad (iCloud ej tillgänglig?)")
     except subprocess.TimeoutExpired:
         print("timeout")
     return None
