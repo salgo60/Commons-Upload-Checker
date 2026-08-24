@@ -272,11 +272,17 @@ def write_report(db: sqlite3.Connection, path: Path, category: str) -> None:
         counts[status] = counts.get(status, 0) + 1
         cls = "found" if status == "FOUND" else ("ambig" if status == "AMBIGUOUS" else "notfound")
 
+        # Filnamn + UUID-knapp (kopierar UUID → sök i Photos)
+        short_uuid = uuid[:8] if uuid else "?"
+        photos_btn = (f'<button class="uuid-btn" onclick="copyUUID(\'{uuid}\')" '
+                      f'title="Kopiera UUID – sök i Photos: {uuid}">📷 {short_uuid}…</button>')
+        file_cell = f'{fname or "?"}<br>{photos_btn}'
+
         coord_cell = "–"
         if lat and lon:
             coord_cell = (
-                f'<a href="{wikimap(lat,lon)}" target="_blank">📍 {lat:.4f},{lon:.4f}</a>'
-                f' <a href="{osm(lat,lon)}" target="_blank">🗺</a>'
+                f'<a href="{wikimap(lat,lon)}" target="_blank" title="WikiMap">📍 WikiMap</a>'
+                f'&nbsp;<a href="{osm(lat,lon)}" target="_blank" title="OpenStreetMap">🗺 OSM</a>'
             )
 
         action_cell = "–"
@@ -291,7 +297,7 @@ def write_report(db: sqlite3.Connection, path: Path, category: str) -> None:
 
         rows_html += f"""
         <tr class="{cls}">
-          <td title="{uuid}">{fname}</td>
+          <td>{file_cell}</td>
           <td>{date or "–"}</td>
           <td>{coord_cell}</td>
           <td>{status}</td>
@@ -309,7 +315,11 @@ def write_report(db: sqlite3.Connection, path: Path, category: str) -> None:
   h1{{color:#3366cc}}
   .summary{{background:#f0f4ff;padding:.7rem 1rem;border-radius:6px;margin-bottom:1rem}}
   table{{border-collapse:collapse;width:100%;font-size:.9rem}}
-  th{{background:#3366cc;color:#fff;padding:.5rem .8rem;text-align:left;position:sticky;top:0}}
+  th{{background:#3366cc;color:#fff;padding:.5rem .8rem;text-align:left;
+      position:sticky;top:0;cursor:pointer;user-select:none}}
+  th:hover{{background:#2255bb}}
+  th.asc::after{{content:" ▲"}}
+  th.desc::after{{content:" ▼"}}
   td{{padding:.4rem .8rem;border-bottom:1px solid #ddd;vertical-align:top}}
   tr.found td:first-child{{border-left:4px solid #2da44e}}
   tr.ambig td:first-child{{border-left:4px solid #f0a500}}
@@ -317,6 +327,12 @@ def write_report(db: sqlite3.Connection, path: Path, category: str) -> None:
   tr:hover{{background:#f6f8fa}}
   a{{color:#3366cc;text-decoration:none}}
   a:hover{{text-decoration:underline}}
+  .uuid-btn{{font-size:.75rem;padding:2px 6px;border:1px solid #ccc;
+             border-radius:4px;background:#f6f8fa;cursor:pointer;color:#555}}
+  .uuid-btn:hover{{background:#e0e7ff}}
+  #toast{{position:fixed;bottom:2rem;left:50%;transform:translateX(-50%);
+          background:#333;color:#fff;padding:.5rem 1.2rem;border-radius:6px;
+          display:none;font-size:.9rem;z-index:999}}
 </style></head><body>
 <h1>Apple Photos → Wikimedia Commons</h1>
 <p class="summary">
@@ -324,10 +340,41 @@ def write_report(db: sqlite3.Connection, path: Path, category: str) -> None:
   Kategori: <a href="{cat_url}" target="_blank">{category}</a><br>
   {summary}
 </p>
-<table>
-  <thead><tr><th>Fil</th><th>Datum</th><th>Koordinater</th><th>Status</th><th>Commons / Åtgärd</th></tr></thead>
+<div id="toast">UUID kopierat! Sök i Photos med ⌘F</div>
+<table id="report">
+  <thead><tr>
+    <th onclick="sortTable(0)">Fil / UUID</th>
+    <th onclick="sortTable(1)">Datum</th>
+    <th onclick="sortTable(2)">Koordinater</th>
+    <th onclick="sortTable(3)">Status</th>
+    <th>Commons / Åtgärd</th>
+  </tr></thead>
   <tbody>{rows_html}</tbody>
-</table></body></html>"""
+</table>
+<script>
+function copyUUID(uuid) {{
+  navigator.clipboard.writeText(uuid).then(() => {{
+    var t = document.getElementById('toast');
+    t.style.display = 'block';
+    setTimeout(() => t.style.display = 'none', 2000);
+  }});
+}}
+function sortTable(col) {{
+  var tbl = document.getElementById('report');
+  var th = tbl.querySelectorAll('th')[col];
+  var asc = !th.classList.contains('asc');
+  tbl.querySelectorAll('th').forEach(h => h.classList.remove('asc','desc'));
+  th.classList.add(asc ? 'asc' : 'desc');
+  var rows = Array.from(tbl.tBodies[0].rows);
+  rows.sort(function(a, b) {{
+    var x = a.cells[col].innerText.trim();
+    var y = b.cells[col].innerText.trim();
+    return asc ? x.localeCompare(y, 'sv') : y.localeCompare(x, 'sv');
+  }});
+  rows.forEach(r => tbl.tBodies[0].appendChild(r));
+}}
+</script>
+</body></html>"""
 
     path.write_text(html, encoding="utf-8")
     print(f"HTML-rapport sparad i {path}")
