@@ -422,64 +422,81 @@ function sortTable(col) {{
     print(f"HTML-rapport sparad i {path}")
 
 
-# ── Ta bort FOUND-bilder från Photos-album ────────────────────────────────────
+# ── Ta bort FOUND-bilder från Photos-album (rebuild-approach) ─────────────────
 def remove_found_from_album(db: sqlite3.Connection, album_name: str,
                             session_uuids: list[str]) -> None:
-    """Tar bort FOUND-bilder (från aktuell session) från Photos-albumet via osascript."""
+    """Bygger om albumet utan FOUND-bilder.
+    Photos.app AppleScript stödjer inte 'remove from album' direkt,
+    så vi skapar ett nytt album med bara NOT_FOUND/AMBIGUOUS, raderar gamla.
+    """
     if not session_uuids:
-        print("\n4. Inga assets i aktuell session att ta bort.")
-        return
-    placeholders = ",".join("?" * len(session_uuids))
-    found = db.execute(
-        f"SELECT uuid, filename FROM assets WHERE status = 'FOUND' AND uuid IN ({placeholders})",
-        session_uuids
-    ).fetchall()
-    if not found:
-        print("\n4. Inga FOUND-bilder att ta bort från albumet.")
+        print("\n4. Inga assets att bearbeta.")
         return
 
-    print(f"\n4. Tar bort {len(found)} FOUND-bilder från albumet '{album_name}'...")
-    batch_size = 20
-    removed = 0
-    errors = 0
-    for i in range(0, len(found), batch_size):
-        batch = found[i : i + batch_size]
-        uuid_list = ", ".join(f'"{u}"' for u, _ in batch)
+    placeholders = ",".join("?" * len(session_uuids))
+    found_uuids = {r[0] for r in db.execute(
+        f"SELECT uuid FROM assets WHERE status='FOUND' AND uuid IN ({placeholders})",
+        session_uuids
+    )}
+    keep_uuids = [u for u in session_uuids if u not in found_uuids]
+
+    print(f"\n4. Bygger om albumet '{album_name}': "
+          f"{len(found_uuids)} FOUND tas bort, {len(keep_uuids)} behålls ...")
+
+    if not found_uuids:
+        print("   Inga FOUND att ta bort.")
+        return
+
+    temp_name = f"{album_name}_uppdaterad"
+
+    # Skapa temp-album
+    script_create = f'tell application "Photos" to make new album named "{temp_name}"'
+    subprocess.run(["osascript", "-e", script_create], capture_output=True, timeout=20)
+
+    # Lägg till keep-bilder i temp-albumet (batchar om 20)
+    added = 0
+    for i in range(0, len(keep_uuids), 20):
+        batch = keep_uuids[i : i + 20]
+        uuid_list = ", ".join(f'"{u}"' for u in batch)
         script = f'''
 tell application "Photos"
-    set theAlbum to album named "{album_name}"
-    set toRemove to {{}}
+    set newAlbum to album named "{temp_name}"
+    set toAdd to {{}}
     repeat with u in {{{uuid_list}}}
         try
-            set end of toRemove to media item id u
+            set end of toAdd to media item id (contents of u)
         end try
     end repeat
-    remove toRemove from theAlbum
-    return count of toRemove
+    add toAdd to newAlbum
+    return count of toAdd
 end tell'''
         for attempt in range(3):
             try:
-                result = subprocess.run(
-                    ["osascript", "-e", script],
-                    capture_output=True, text=True, timeout=30
-                )
-                if result.returncode == 0:
-                    removed += len(batch)
+                r = subprocess.run(["osascript", "-e", script],
+                                   capture_output=True, text=True, timeout=30)
+                if r.returncode == 0:
+                    added += len(batch)
                     break
-                else:
-                    if attempt < 2:
-                        time.sleep(3)
-                    else:
-                        errors += len(batch)
+                time.sleep(2)
             except Exception:
-                if attempt < 2:
-                    time.sleep(3)
-                else:
-                    errors += len(batch)
-        print(f"  {removed}/{len(found)} borttagna ...", end="\r", flush=True)
+                time.sleep(2)
+        print(f"   {added}/{len(keep_uuids)} kopierade ...", end="\r", flush=True)
         time.sleep(0.3)
 
-    print(f"\n  Klart! {removed} borttagna från albumet, {errors} misslyckades.")
+    # Radera gamla albumet och döp om
+    script_rename = f'''
+tell application "Photos"
+    delete album named "{album_name}"
+    set name of album named "{temp_name}" to "{album_name}"
+end tell'''
+    r = subprocess.run(["osascript", "-e", script_rename],
+                       capture_output=True, text=True, timeout=30)
+    if r.returncode == 0:
+        print(f"\n   Klart! Album '{album_name}' nu med {len(keep_uuids)} bilder "
+              f"({len(found_uuids)} FOUND borttagna).")
+    else:
+        print(f"\n   OBS: Rename misslyckades: {r.stderr.strip()}")
+        print(f"   Albumet '{temp_name}' skapades med {added} bilder – radera '{album_name}' manuellt.")
 
 
 
