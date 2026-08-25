@@ -179,20 +179,36 @@ def geosearch(lat: float, lon: float, radius: int = RADIUS_M) -> list[dict]:
         return []
 
 
-def get_uploader(title: str) -> str | None:
+DATE_TOLERANCE_DAYS = 30  # max dagars skillnad för username-match
+
+
+def get_file_info(title: str) -> tuple[str | None, datetime | None]:
+    """Hämtar uppladdare och datum från Commons imageinfo API."""
     params = {
         "action": "query", "titles": title,
-        "prop": "imageinfo", "iiprop": "user", "format": "json",
+        "prop": "imageinfo", "iiprop": "user|datetime", "format": "json",
     }
     try:
         r = requests.get(COMMONS_API, params=params, timeout=10, headers={"User-Agent": UA})
         r.raise_for_status()
         pages = r.json().get("query", {}).get("pages", {})
         for page in pages.values():
-            return (page.get("imageinfo") or [{}])[0].get("user")
+            info = (page.get("imageinfo") or [{}])[0]
+            user = info.get("user")
+            raw_date = info.get("timestamp", "")
+            try:
+                date = datetime.strptime(raw_date[:10], "%Y-%m-%d") if raw_date else None
+            except ValueError:
+                date = None
+            return user, date
     except Exception:
         pass
-    return None
+    return None, None
+
+
+def get_uploader(title: str) -> str | None:
+    user, _ = get_file_info(title)
+    return user
 
 
 def get_sdc_date(pageid: int) -> datetime | None:
@@ -243,9 +259,23 @@ def check_asset_against_commons(meta: dict, category_files: dict[str, int],
         mid = f"M{pageid}" if pageid else ""
         url = "https://commons.wikimedia.org/wiki/" + title.replace(" ", "_")
 
-        uploader = get_uploader(title)
+        uploader, upload_date = get_file_info(title)
         if uploader and uploader.lower() == username.lower():
-            return "FOUND", title, mid, url
+            # Kontrollera datum även för username-match (undviker falskt FOUND)
+            photo_date = None
+            try:
+                photo_date = datetime.strptime(meta["date"][:10], "%Y-%m-%d") if meta.get("date") else None
+            except ValueError:
+                pass
+            if photo_date and upload_date:
+                diff = abs((photo_date - upload_date).days)
+                if diff <= DATE_TOLERANCE_DAYS:
+                    return "FOUND", title, mid, url
+                # Stor datumskillnad trots rätt uppladdare → inte samma bild
+                continue
+            else:
+                # Inget datum att jämföra – acceptera username-match
+                return "FOUND", title, mid, url
 
     # Träff finns men inte av rätt uppladdare
     return "AMBIGUOUS", candidates[0]["title"], "", \
