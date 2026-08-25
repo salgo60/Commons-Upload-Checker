@@ -253,13 +253,22 @@ def check_asset_against_commons(meta: dict, category_files: dict[str, int],
 
 
 # ── HTML-rapport ──────────────────────────────────────────────────────────────
-def write_report(db: sqlite3.Connection, path: Path, category: str) -> None:
+def write_report(db: sqlite3.Connection, path: Path, category: str,
+                 session_uuids: list[str] | None = None) -> None:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    rows = db.execute("""
-        SELECT uuid, original_filename, date, lat, lon,
-               status, commons_title, commons_mid, commons_url, exported_path
-        FROM assets ORDER BY date
-    """).fetchall()
+    if session_uuids:
+        placeholders = ",".join("?" * len(session_uuids))
+        rows = db.execute(f"""
+            SELECT uuid, original_filename, date, lat, lon,
+                   status, commons_title, commons_mid, commons_url, exported_path
+            FROM assets WHERE uuid IN ({placeholders}) ORDER BY date
+        """, session_uuids).fetchall()
+    else:
+        rows = db.execute("""
+            SELECT uuid, original_filename, date, lat, lon,
+                   status, commons_title, commons_mid, commons_url, exported_path
+            FROM assets ORDER BY date
+        """).fetchall()
 
     def osm(lat, lon):
         return f"https://www.openstreetmap.org/#map=19/{lat}/{lon}&layers=N"
@@ -384,10 +393,16 @@ function sortTable(col) {{
 
 
 # ── Ta bort FOUND-bilder från Photos-album ────────────────────────────────────
-def remove_found_from_album(db: sqlite3.Connection, album_name: str) -> None:
-    """Tar bort bilder med status FOUND från Photos-albumet via osascript."""
+def remove_found_from_album(db: sqlite3.Connection, album_name: str,
+                            session_uuids: list[str]) -> None:
+    """Tar bort FOUND-bilder (från aktuell session) från Photos-albumet via osascript."""
+    if not session_uuids:
+        print("\n4. Inga assets i aktuell session att ta bort.")
+        return
+    placeholders = ",".join("?" * len(session_uuids))
     found = db.execute(
-        "SELECT uuid, filename FROM assets WHERE status = 'FOUND'"
+        f"SELECT uuid, filename FROM assets WHERE status = 'FOUND' AND uuid IN ({placeholders})",
+        session_uuids
     ).fetchall()
     if not found:
         print("\n4. Inga FOUND-bilder att ta bort från albumet.")
@@ -488,6 +503,9 @@ def main() -> None:
     assets_raw = query_photos(args.from_date, to_date_exclusive, args.album)
     print(f"   {len(assets_raw)} assets hittade i Photos.")
 
+    # Håll koll på UUIDs från aktuell session (för remove-found)
+    session_uuids = [a["uuid"] for a in assets_raw if a.get("uuid")]
+
     new_count = 0
     skipped_no_gps = 0
     for asset in assets_raw:
@@ -537,17 +555,24 @@ def main() -> None:
         else:
             print("\n3. Inga NOT_FOUND att exportera.")
 
-    # Sammanfattning
-    print("\n─── Sammanfattning ───")
-    for row in db.execute("SELECT status, COUNT(*) FROM assets GROUP BY status ORDER BY COUNT(*) DESC"):
-        print(f"  {row[0]}: {row[1]}")
+    # Sammanfattning (enbart aktuell session)
+    print("\n─── Sammanfattning (aktuell session) ───")
+    if session_uuids:
+        placeholders = ",".join("?" * len(session_uuids))
+        for row in db.execute(
+            f"SELECT status, COUNT(*) FROM assets WHERE uuid IN ({placeholders}) GROUP BY status ORDER BY COUNT(*) DESC",
+            session_uuids
+        ):
+            print(f"  {row[0]}: {row[1]}")
+    else:
+        print("  (inga assets)")
 
-    # HTML-rapport
-    write_report(db, args.html, args.category)
+    # HTML-rapport (enbart aktuell session)
+    write_report(db, args.html, args.category, session_uuids)
 
     # Ta bort FOUND från album
     if args.remove_found and args.album:
-        remove_found_from_album(db, args.album)
+        remove_found_from_album(db, args.album, session_uuids)
     elif args.remove_found and not args.album:
         print("\n4. --remove-found kräver --album, hoppas över.")
 
