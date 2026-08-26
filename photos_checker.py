@@ -588,11 +588,15 @@ def main() -> None:
                 update_status(db, uuid, status, c_title, c_mid, c_url)
                 bar.set_postfix(status=status)
 
-    # Export av NOT_FOUND
+    # Export av NOT_FOUND (enbart aktuell session)
     if not args.no_export:
+        placeholders = ",".join("?" * len(session_uuids))
         not_found = db.execute(
-            "SELECT uuid, original_filename FROM assets WHERE status = 'NOT_FOUND' AND exported_path IS NULL OR exported_path = ''"
-        ).fetchall()
+            f"SELECT uuid, original_filename FROM assets "
+            f"WHERE status = 'NOT_FOUND' AND uuid IN ({placeholders}) "
+            f"AND (exported_path IS NULL OR exported_path = '')",
+            session_uuids
+        ).fetchall() if session_uuids else []
         if not_found:
             print(f"\n3. Exporterar {len(not_found)} NOT_FOUND-bilder till {args.export_dir}...")
             for uuid, fname in tqdm(not_found, unit="fil"):
